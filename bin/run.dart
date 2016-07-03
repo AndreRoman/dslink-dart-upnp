@@ -1,5 +1,7 @@
 import "dart:convert";
 
+import "package:http/http.dart" as http;
+
 import "package:dslink/dslink.dart";
 import "package:dslink/nodes.dart";
 import "package:dslink/utils.dart";
@@ -135,7 +137,7 @@ setupClient(DiscoveredClient client) async {
     var device = await client.getDevice();
     var nodePath = "/${NodeNamer.createName(device.uuid)}";
 
-    setOrUpdateNode(nodePath, {
+    var deviceNodeMap = {
       r"$name": device.friendlyName,
       "@pingUrl": client.location,
       "friendlyName": {
@@ -186,7 +188,15 @@ setupClient(DiscoveredClient client) async {
       "services": {
         r"$name": "Services"
       }
-    });
+    };
+    
+    setOrUpdateNode(nodePath, deviceNodeMap);
+    
+    var sendDeviceRequestNode = new SendDeviceRequest(
+      device,
+      "${nodePath}/sendDeviceRequest"
+    );
+    provider.setNode(sendDeviceRequestNode.path, sendDeviceRequestNode);
 
     for (ServiceDescription desc in device.services) {
       var serviceIdName = NodeNamer.createName(desc.id);
@@ -336,3 +346,99 @@ setupClient(DiscoveredClient client) async {
   }
 }
 
+class SendDeviceRequest extends SimpleNode {
+  Device device;
+  
+  SendDeviceRequest(this.device, String path) : super(path) {
+    configs[r"$name"] = "Send Device Request";
+    configs[r"$invokable"] = "write";
+    configs[r"$result"] = "values";
+    configs[r"$params"] = [
+      {
+        "name": "httpPath",
+        "type": "string",
+        "default": "/"
+      },
+      {
+        "name": "body",
+        "type": "string",
+        "default": "/"
+      },
+      {
+        "name": "method",
+        "type": "enum[GET,DELETE,POST,PUT]",
+        "default": "GET"
+      },
+      {
+        "name": "headers",
+        "type": "string",
+        "default": "{}"
+      }
+    ];
+    
+    configs[r"$columns"] = [
+      {
+        "name": "statusCode",
+        "type": "number"
+      },
+      {
+        "name": "responseBody",
+        "type": "string"
+      },
+      {
+        "name": "responseHeaders",
+        "type": "string"
+      }
+    ];
+  }
+ 
+  @override
+  onInvoke(Map<String, dynamic> params) async {
+    String httpPath = params["httpPath"];
+    String body = params["body"];
+    String method = params["method"];
+    String headers = params["headers"];
+    
+    if (httpPath == null) {
+      httpPath = "/";
+    }
+    
+    if (method == null) {
+      method = "GET";
+    }
+    
+    if (body == null || body.toString().isEmpty) {
+      body = null;
+    }
+    
+    if (headers == null || headers.toString().isEmpty) {
+      headers = "{}";
+    }
+    
+    var req = new http.Request(
+      method,
+      Uri.parse(device.urlBase).resolve(httpPath)
+    );
+    
+    if (body != null) {
+      req.body = body.toString();
+    }
+    
+    req.headers.addAll(JSON.decode(headers));
+    
+    var resp = await UpnpCommon
+      .httpClient
+      .send(req)
+      .timeout(const Duration(seconds: 10));
+    
+    var respString = await resp.stream.bytesToString();
+
+    return [
+      [
+        resp.statusCode,
+        respString,
+        JSON.encode(resp.headers)
+      ]
+    ];
+  }
+}
