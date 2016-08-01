@@ -1,3 +1,4 @@
+import "dart:async";
 import "dart:convert";
 
 import "package:http/http.dart" as http;
@@ -17,10 +18,15 @@ LinkProvider link;
 SimpleNodeProvider provider;
 Disposable autoDestroyDeviceChecker;
 
+StateSubscriptionManager subscriptionManager;
+
 main(List<String> args) async {
   var func = () async {
     await _main(args);
   };
+
+  subscriptionManager = new StateSubscriptionManager();
+  await subscriptionManager.init();
 
   if (const bool.fromEnvironment("upnp.debug", defaultValue: false)) {
     await Chain.capture(() async {
@@ -44,12 +50,27 @@ _main(List<String> args) async {
       String pingUrl = node.attributes["@pingUrl"];
 
       if (pingUrl != null) {
-        var resp = await UpnpCommon.httpClient.get(pingUrl)
-          .timeout(const Duration(seconds: 5), onTimeout: () {
-          return null;
-        });
-
+        http.Response resp;
+        try {
+          resp = await UpnpCommon.httpClient.get(pingUrl)
+            .timeout(const Duration(seconds: 10), onTimeout: () {
+            return null;
+          });
+        } catch (e) {}
         if (resp == null || resp.statusCode != 200) {
+          SimpleNode uuidNode = node.getChild("uuid");
+          if (uuidNode != null) {
+            var val = uuidNode.value;
+            for (String key in _valueUpdateSubs.keys.toList()) {
+              if (key.startsWith("${val}:")) {
+                var sub = _valueUpdateSubs.remove(key);
+                if (sub != null) {
+                  sub.cancel();
+                }
+              }
+            }
+          }
+          _currentDeviceIds.remove(node.getConfig(r"$discoverId"));
           link.removeNode(node.path);
         }
       }
@@ -68,11 +89,20 @@ _main(List<String> args) async {
   provider.setNode(discoverDevicesNode.path, discoverDevicesNode);
 
   await for (DiscoveredClient client in discovery.quickDiscoverClients(
-    searchInterval: const Duration(hours: 1)
+    searchInterval: const Duration(seconds: 30)
   )) {
-    await setupClient(client);
+    var uuid = client.usn.split("::").first;
+    if (_currentDeviceIds.contains(uuid)) {
+      continue;
+    }
+
+    if (shouldCheckDevice(uuid)) {
+      setupClient(client, uuid);
+    }
   }
 }
+
+Set<String> _currentDeviceIds = new Set<String>();
 
 class DirectMessageException {
   final String message;
@@ -132,12 +162,16 @@ SimpleNode setOrUpdateNode(String path, Map<String, dynamic> map) {
   return node;
 }
 
-setupClient(DiscoveredClient client) async {
+Map<String, int> _cooldown = {};
+
+setupClient(DiscoveredClient client, String uuid) async {
   try {
     var device = await client.getDevice();
+    _currentDeviceIds.add(uuid);
     var nodePath = "/${NodeNamer.createName(device.uuid)}";
 
     var deviceNodeMap = {
+      r"$discoverId": uuid,
       r"$name": device.friendlyName,
       "@pingUrl": client.location,
       "friendlyName": {
@@ -189,9 +223,9 @@ setupClient(DiscoveredClient client) async {
         r"$name": "Services"
       }
     };
-    
+
     setOrUpdateNode(nodePath, deviceNodeMap);
-    
+
     var sendDeviceRequestNode = new SendDeviceRequest(
       device,
       "${nodePath}/sendDeviceRequest"
@@ -227,6 +261,9 @@ setupClient(DiscoveredClient client) async {
           r"$name": "SCPD Url",
           r"$type": "string",
           "?value": desc.scpdUrl
+        },
+        "variables": {
+          r"$name": "Variables"
         }
       });
       var service = await desc.getService();
@@ -235,7 +272,8 @@ setupClient(DiscoveredClient client) async {
         continue;
       }
 
-      var actionNodeMap = {};
+      var serviceProviderMap = {};
+      var variableNodeMap = {};
 
       for (Action act in service.actions) {
         if (act.name == null) {
@@ -281,7 +319,9 @@ setupClient(DiscoveredClient client) async {
               logger.fine("Invoke ${act.name} with ${args}");
             }
 
-            var result = await act.invoke(args);
+            var result = await act.invoke(args).timeout(
+              const Duration(seconds: 5)
+            );
 
             if (logger.isLoggable(Level.FINE)) {
               logger.fine("Got Invoke Result: ${result}");
@@ -301,6 +341,10 @@ setupClient(DiscoveredClient client) async {
 
             return out;
           } catch (e, stack) {
+            if (logger.isLoggable(Level.FINE)) {
+              logger.fine("Got Invoke Error: ${e}");
+            }
+
             if (e is UpnpException) {
               XmlElement el = e.element;
               var errorCode = el.findAllElements("errorCode");
@@ -336,19 +380,102 @@ setupClient(DiscoveredClient client) async {
           r"$params": actionParamDefs
         });
 
-        actionNodeMap[act.name] = actionNode;
+        serviceProviderMap[act.name] = actionNode;
       }
 
-      setOrUpdateNode(servicePath, actionNodeMap);
+      for (StateVariable v in service.stateVariables) {
+        if (v.doesSendEvents != true) {
+          continue;
+        }
+
+        var name = NodeNamer.createName(v.name);
+        variableNodeMap[name] = {
+          r"$name": v.name,
+          r"$type": "dynamic"
+        };
+      }
+
+      var tid = "${device.uuid}:${service.type}";
+      if (_valueUpdateSubs.containsKey(tid)) {
+        var rsub = _valueUpdateSubs.remove(tid);
+        if (rsub != null) {
+          rsub.cancel();
+        }
+      }
+
+      var sub = subscriptionManager.subscribeToService(service).listen((Map<String, dynamic> data) {
+        for (var key in data.keys) {
+          var name = NodeNamer.createName(key);
+          var node = link["${servicePath}/variables/${name}"];
+          if (node != null) {
+            node.updateValue(data[key]);
+          }
+        }
+      }, onError: (e) {});
+
+      _valueUpdateSubs[tid] = sub;
+
+      serviceProviderMap["variables"] = variableNodeMap;
+      setOrUpdateNode(servicePath, serviceProviderMap);
     }
   } catch (e, stack) {
-    logger.fine("Failed to fetch device: ${client.location}", e, stack);
+    increaseDeviceFail(uuid);
+    if (logger.isLoggable(Level.FINEST)) {
+      logger.finest("Failed to fetch device: ${client.location}", e, stack);
+    } else {
+      logger.fine("Failed to fetch device: ${client.location}", e);
+    }
   }
 }
 
+increaseDeviceFail(String id) {
+  int fail = _cooldown[id];
+  if (fail == null) {
+    fail = 1;
+  } else {
+    fail++;
+  }
+
+  if (fail >= 5) {
+    var level = 8;
+    logger.fine("Starting cooldown for device ${id} at level ${level}.");
+    fail = -level;
+  } else {
+    logger.fine("Increasing failure count for device ${id} to ${fail}.");
+  }
+
+  _cooldown[id] = fail;
+}
+
+bool shouldCheckDevice(String id) {
+  int c = _cooldown[id];
+
+  if (c != null) {
+    if (c.isNegative) {
+      c++;
+      logger.fine("Cooldown for device ${id} is now at level ${c.abs()}.");
+    } else {
+      return true;
+    }
+
+    if (c == 0) {
+      logger.fine("Cooldown for device ${id} is now over.");
+      _cooldown.remove(id);
+      return true;
+    } else {
+      _cooldown[id] = c;
+      return false;
+    }
+   }
+
+  return true;
+}
+
+Map<String, StreamSubscription> _valueUpdateSubs = {};
+
 class SendDeviceRequest extends SimpleNode {
   Device device;
-  
+
   SendDeviceRequest(this.device, String path) : super(path) {
     configs[r"$name"] = "Send Device Request";
     configs[r"$invokable"] = "write";
@@ -375,7 +502,7 @@ class SendDeviceRequest extends SimpleNode {
         "default": "{}"
       }
     ];
-    
+
     configs[r"$columns"] = [
       {
         "name": "statusCode",
@@ -391,46 +518,46 @@ class SendDeviceRequest extends SimpleNode {
       }
     ];
   }
- 
+
   @override
   onInvoke(Map<String, dynamic> params) async {
     String httpPath = params["httpPath"];
     String body = params["body"];
     String method = params["method"];
     String headers = params["headers"];
-    
+
     if (httpPath == null) {
       httpPath = "/";
     }
-    
+
     if (method == null) {
       method = "GET";
     }
-    
+
     if (body == null || body.toString().isEmpty) {
       body = null;
     }
-    
+
     if (headers == null || headers.toString().isEmpty) {
       headers = "{}";
     }
-    
+
     var req = new http.Request(
       method,
       Uri.parse(device.urlBase).resolve(httpPath)
     );
-    
+
     if (body != null) {
       req.body = body.toString();
     }
-    
+
     req.headers.addAll(JSON.decode(headers));
-    
+
     var resp = await UpnpCommon
       .httpClient
       .send(req)
       .timeout(const Duration(seconds: 10));
-    
+
     var respString = await resp.stream.bytesToString();
 
     return [
