@@ -43,6 +43,13 @@ _main(List<String> args) async {
   link.connect();
   provider = link.provider;
 
+  SimpleNode subscriptionClientPortNode = link.addNode("/subscriptionClientPort", {
+    r"$name": "Subscription Client Port",
+    r"$type": "number",
+    "?value": subscriptionManager.server.port
+  });
+  subscriptionClientPortNode.serializable = false;
+
   var discovery = new DeviceDiscoverer();
 
   autoDestroyDeviceChecker = Scheduler.safeEvery(Interval.FIVE_SECONDS, () async {
