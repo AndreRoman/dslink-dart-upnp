@@ -23,18 +23,25 @@ StateSubscriptionManager subscriptionManager;
 
 main(List<String> args) async {
   var func = () async {
+    subscriptionManager = new StateSubscriptionManager();
+    await subscriptionManager.init();
     await _main(args);
   };
-
-  subscriptionManager = new StateSubscriptionManager();
-  await subscriptionManager.init();
 
   if (const bool.fromEnvironment("upnp.debug", defaultValue: false)) {
     await Chain.capture(() async {
       await func();
     });
   } else {
-    await func();
+    await runZoned(() async {
+      await func();
+    }, onError: (e, stack) {
+      if (stack.toString().contains("IOClient.")) {
+        return;
+      } else {
+        throw e;
+      }
+    });
   }
 }
 
