@@ -1,5 +1,6 @@
 import "dart:async";
 import "dart:convert";
+import "dart:typed_data";
 
 import "package:http/http.dart" as http;
 
@@ -539,8 +540,7 @@ class SendDeviceRequest extends SimpleNode {
       },
       {
         "name": "body",
-        "type": "string",
-        "default": "/"
+        "type": "dynamic"
       },
       {
         "name": "method",
@@ -573,7 +573,7 @@ class SendDeviceRequest extends SimpleNode {
   @override
   onInvoke(Map<String, dynamic> params) async {
     String httpPath = params["httpPath"];
-    String body = params["body"];
+    var body = params["body"];
     String method = params["method"];
     String headers = params["headers"];
 
@@ -585,7 +585,7 @@ class SendDeviceRequest extends SimpleNode {
       method = "GET";
     }
 
-    if (body == null || body.toString().isEmpty) {
+    if (body == null || (body is String && body.isEmpty)) {
       body = null;
     }
 
@@ -598,11 +598,21 @@ class SendDeviceRequest extends SimpleNode {
       Uri.parse(device.urlBase).resolve(httpPath)
     );
 
-    if (body != null) {
+    if (body is String) {
       req.body = body.toString();
+    } else if (body is ByteData) {
+
     }
 
-    req.headers.addAll(JSON.decode(headers));
+    try {
+      req.headers.addAll(JSON.decode(headers));
+    } catch (_) {
+      try {
+        req.headers.addAll(Uri.splitQueryString(headers));
+      } catch (e) {
+        rethrow;
+      }
+    }
 
     var resp = await UpnpCommon
       .httpClient
