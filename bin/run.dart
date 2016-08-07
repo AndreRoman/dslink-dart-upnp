@@ -165,6 +165,18 @@ SimpleNode setOrUpdateNode(String path, Map<String, dynamic> map) {
 Map<String, int> _cooldown = {};
 
 setupClient(DiscoveredClient client, String uuid) async {
+  await runZoned(() {
+    doSetupClient(client, uuid);
+  }, onError: (e, stack) {
+    logger.fine(
+      "Failed to setup device at ${client.location} (${client.usn})",
+      e,
+      stack
+    );
+  });
+}
+
+doSetupClient(DiscoveredClient client, String uuid) async {
   try {
     var device = await client.getDevice();
     _currentDeviceIds.add(uuid);
