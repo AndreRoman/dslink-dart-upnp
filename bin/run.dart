@@ -182,6 +182,10 @@ doSetupClient(DiscoveredClient client, String uuid) async {
     _currentDeviceIds.add(uuid);
     var nodePath = "/${NodeNamer.createName(device.uuid)}";
 
+    var ourIpToDevice = await InternalNetworkUtils.getMostLikelyHost(
+      Uri.parse(device.url)
+    );
+
     var deviceNodeMap = {
       r"$discoverId": uuid,
       r"$name": device.friendlyName,
@@ -230,6 +234,11 @@ doSetupClient(DiscoveredClient client, String uuid) async {
         r"$name": "Presentation Url",
         r"$type": "string",
         "?value": device.presentationUrl
+      },
+      "backReferenceAddress": {
+        r"$name": "Client Reference IP",
+        r"$type": "string",
+        "?value": ourIpToDevice
       },
       "services": {
         r"$name": "Services"
