@@ -45,8 +45,8 @@ _main(List<String> args) async {
 
   SimpleNode subscriptionClientPortNode = link.addNode("/subscriptionClientPort", {
     r"$name": "Subscription Client Port",
-    r"$type": "number",
-    "?value": subscriptionManager.server.port
+    r"$type": "string",
+    "?value": subscriptionManager.server.port.toString()
   });
   subscriptionClientPortNode.serializable = false;
 
