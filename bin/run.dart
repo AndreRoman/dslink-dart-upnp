@@ -455,20 +455,32 @@ doSetupClient(DiscoveredClient client, String uuid) async {
         }
       }
 
+      setOrUpdateNode(serviceNode.path, serviceProviderMap);
+      var variablesNode = setOrUpdateNode("${serviceNode.path}/variables", variableNodeMap);
+      Map<String, SimpleNode> valueNodes = {};
+
+      for (String vid in variableNodeMap.keys) {
+        valueNodes[vid] = variablesNode.getChild(vid);
+      }
+
       var sub = subscriptionManager.subscribeToService(service).listen((Map<String, dynamic> data) {
         for (var key in data.keys) {
           var name = NodeNamer.createName(key);
-          var node = link["${servicePath}/variables/${name}"];
+          var node = valueNodes[name];
           if (node != null) {
             node.updateValue(data[key]);
+          } else {
+            link.addNode("${variablesNode.path}/${name}", {
+              r"$name": name,
+              r"$type": "dynamic",
+              "?value": data[key]
+            });
           }
         }
-      }, onError: (e) {});
+      }, onError: (e) {
+      });
 
       _valueUpdateSubs[tid] = sub;
-
-      serviceProviderMap["variables"] = variableNodeMap;
-      setOrUpdateNode(servicePath, serviceProviderMap);
     }
   } catch (e, stack) {
     increaseDeviceFail(uuid);
