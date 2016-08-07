@@ -17,6 +17,7 @@ import "package:stack_trace/stack_trace.dart";
 LinkProvider link;
 SimpleNodeProvider provider;
 Disposable autoDestroyDeviceChecker;
+DeviceDiscoverer discovery = new DeviceDiscoverer();
 
 StateSubscriptionManager subscriptionManager;
 
@@ -49,8 +50,6 @@ _main(List<String> args) async {
     "?value": subscriptionManager.server.port.toString()
   });
   subscriptionClientPortNode.serializable = false;
-
-  var discovery = new DeviceDiscoverer();
 
   autoDestroyDeviceChecker = Scheduler.safeEvery(Interval.FIVE_SECONDS, () async {
     for (SimpleNode node in link.getNode("/").children.values.toList()) {
@@ -95,17 +94,34 @@ _main(List<String> args) async {
 
   provider.setNode(discoverDevicesNode.path, discoverDevicesNode);
 
-  await for (DiscoveredClient client in discovery.quickDiscoverClients(
-    searchInterval: const Duration(seconds: 30)
-  )) {
-    var uuid = client.usn.split("::").first;
-    if (_currentDeviceIds.contains(uuid)) {
-      continue;
-    }
+  await initiateDiscovery();
+}
 
-    if (shouldCheckDevice(uuid)) {
-      setupClient(client, uuid);
+initiateDiscovery() async {
+  try {
+    await for (DiscoveredClient client in discovery.quickDiscoverClients(
+      searchInterval: const Duration(seconds: 30)
+    )) {
+      var uuid = client.usn.split("::").first;
+      if (_currentDeviceIds.contains(uuid)) {
+        continue;
+      }
+
+      if (shouldCheckDevice(uuid)) {
+        setupClient(client, uuid);
+      }
     }
+  } catch (e, stack) {
+    try {
+      discovery.stop();
+      discovery = null;
+    } catch (e) {}
+    discovery = new DeviceDiscoverer();
+
+    logger.warning("Device discovery crashed. Restarting.", e, stack);
+    new Future.delayed(const Duration(seconds: 2), () {
+      initiateDiscovery();
+    });
   }
 }
 
