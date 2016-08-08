@@ -26,6 +26,7 @@ main(List<String> args) async {
   var func = () async {
     subscriptionManager = new StateSubscriptionManager();
     await subscriptionManager.init();
+    subscriptionManager.debugLogger = logger;
     await _main(args);
   };
 
